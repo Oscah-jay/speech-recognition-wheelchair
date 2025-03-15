@@ -28,7 +28,7 @@ def create_user_personas():
     personas = [
         {
             "id": 1,
-            "name": "Michael",
+            "name": "Oscah",
             "age": 45,
             "disability": "Spinal cord injury (C5-C6)",
             "tech_proficiency": "Medium",
@@ -47,7 +47,7 @@ def create_user_personas():
         },
         {
             "id": 2,
-            "name": "Sarah",
+            "name": "Njoro",
             "age": 67,
             "disability": "Multiple Sclerosis",
             "tech_proficiency": "Low",
