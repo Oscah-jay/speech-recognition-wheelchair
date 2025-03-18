@@ -1589,10 +1589,103 @@ class WheelchairSimulator:
             }, f, indent=2)
         
         return filename
+    
+    # Add to your Python simulator
+import socket
+import json
+
+class UnityInterface:
+    def __init__(self, simulator, host='127.0.0.1', port=5555):
+        self.simulator = simulator
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind((host, port))
+        self.socket.listen(1)
+        self.client = None
+        self.running = False
+        self.thread = None
+    
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._communication_loop)
+        self.thread.daemon = True
+        self.thread.start()
+        print(f"Unity interface started on port 5555. Waiting for connection...")
+    
+    def _communication_loop(self):
+        self.socket.settimeout(1.0)
+        
+        # Wait for Unity to connect
+        while self.running and not self.client:
+            try:
+                self.client, address = self.socket.accept()
+                print(f"Unity connected from {address}")
+            except socket.timeout:
+                continue
+        
+        if self.client:
+            self.client.settimeout(0.1)
+            
+            # Communication loop
+            while self.running:
+                try:
+                    # Send state to Unity
+                    state = self._get_state_for_unity()
+                    self.client.sendall((json.dumps(state) + '\n').encode('utf-8'))
+                    
+                    # Receive commands from Unity
+                    try:
+                        data = self.client.recv(4096)
+                        if data:
+                            self._process_unity_command(data)
+                    except socket.timeout:
+                        pass
+                    
+                    time.sleep(0.05)  # Update at 20Hz
+                    
+                except Exception as e:
+                    print(f"Communication error: {e}")
+                    break
+    
+    def _get_state_for_unity(self):
+        """Get the current state to send to Unity"""
+        status = self.simulator.get_simulation_status()
+        obstacles = self.simulator.sensor_system.environment["obstacles"]
+        
+        return {
+            "wheelchair": {
+                "position": status["position"],
+                "orientation": status["orientation"],
+                "battery": status["battery_level"],
+                "speed": status["navigation"]["speed"],
+                "status": status["navigation"]["status"]
+            },
+            "obstacles": obstacles,
+            "sensors": {k: v for k, v in self.simulator.sensor_system.current_readings.items() if v and v.get("detected", False)}
+        }
+    
+    def _process_unity_command(self, data):
+        """Process commands from Unity"""
+        try:
+            command = json.loads(data.decode('utf-8'))
+            
+            if command["type"] == "voice":
+                self.simulator.process_voice_command(command["text"])
+            elif command["type"] == "goto":
+                self.simulator.navigate_to_position(command["x"], command["y"])
+            # Add more command types as needed
+            
+        except json.JSONDecodeError:
+            print("Invalid command from Unity")
+    
+    def stop(self):
+        self.running = False
+        if self.client:
+            self.client.close()
+        self.socket.close()
 
 
 def main():
-    """Main function to run the wheelchair simulator"""
+    """Main function to run the wheelchair simulator with Unity interface only."""
     # Parse command line arguments
     import argparse
     parser = argparse.ArgumentParser(description='Speech-Controlled Wheelchair Simulator')
@@ -1616,83 +1709,14 @@ def main():
     # Start simulation
     simulator.start_simulation()
     
-    # Simple command line interface
-    print("\nSpeech-Controlled Wheelchair Simulator")
-    print("--------------------------------------")
-    print("Available commands:")
-    print("  say <command> - Simulate speaking a command")
-    print("  status - Show current wheelchair status")
-    print("  map - Show obstacle map")
-    print("  goto <x> <y> - Navigate to position")
-    print("  speed <multiplier> - Set simulation speed")
-    print("  export - Export logs to file")
-    print("  quit - Exit simulator")
+    # Start Unity interface
+    unity_interface = UnityInterface(simulator)
+    unity_interface.start()
+    print("Unity interface started. Run Unity project to visualize.")
     
     try:
         while True:
-            cmd = input("\nEnter command: ").strip()
-            
-            if cmd.startswith("say "):
-                voice_cmd = cmd[4:]
-                result = simulator.process_voice_command(voice_cmd)
-                print(f"Recognition result: {result['recognized']} (Confidence: {result['confidence']:.2f})")
-            
-            elif cmd == "status":
-                status = simulator.get_simulation_status()
-                print(f"Position: ({status['position'][0]:.1f}, {status['position'][1]:.1f})")
-                print(f"Orientation: {status['orientation']:.1f}°")
-                print(f"Battery: {status['battery_level']:.1f}%")
-                print(f"Navigation status: {status['navigation']['status']}")
-                print(f"Speed: {status['navigation']['speed']:.1f} m/s")
-                print(f"Current command: {status['navigation']['command']}")
-                print(f"Distance traveled: {status['metrics']['distance_traveled']:.1f} m")
-            
-            elif cmd == "map":
-                grid = simulator.get_obstacle_map()
-                # Simple ASCII visualization
-                for row in grid:
-                    line = ""
-                    for cell in row:
-                        if cell == 0:
-                            line += "· "  # Empty space
-                        elif cell == 1:
-                            line += "# "  # Obstacle
-                        elif cell == 2:
-                            line += "W "  # Wheelchair
-                    print(line)
-            
-            elif cmd.startswith("goto "):
-                try:
-                    parts = cmd.split()
-                    x = float(parts[1])
-                    y = float(parts[2])
-                    success, result = simulator.navigate_to_position(x, y)
-                    if success:
-                        print(f"Path planned with {len(result)} waypoints")
-                    else:
-                        print(f"Navigation failed: {result}")
-                except (IndexError, ValueError):
-                    print("Invalid command format. Use: goto <x> <y>")
-            
-            elif cmd.startswith("speed "):
-                try:
-                    speed = float(cmd.split()[1])
-                    if simulator.set_simulation_speed(speed):
-                        print(f"Simulation speed set to {speed}x")
-                    else:
-                        print("Invalid speed value")
-                except (IndexError, ValueError):
-                    print("Invalid command format. Use: speed <multiplier>")
-            
-            elif cmd == "export":
-                filename = simulator.export_logs()
-                print(f"Logs exported to {filename}")
-            
-            elif cmd == "quit":
-                break
-            
-            else:
-                print("Unknown command")
+            pass  # Remove CLI interactions and let Unity handle commands
     
     except KeyboardInterrupt:
         print("\nExiting simulator...")
@@ -1700,6 +1724,7 @@ def main():
     finally:
         # Stop simulation
         simulator.stop_simulation()
+
 
 
 if __name__ == "__main__":
