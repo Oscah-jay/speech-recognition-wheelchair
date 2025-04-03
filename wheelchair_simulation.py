@@ -5,17 +5,19 @@ from matplotlib.animation import FuncAnimation
 import math
 import random
 import time
+import threading
+import queue
 
 # For voice recognition
 try:
+    import speech_recognition as sr
     import pyaudio
     import wave
-    import struct
-    import numpy as np
-    from scipy.fftpack import fft
     VOICE_AVAILABLE = True
 except ImportError:
-    print("PyAudio, wave, or scipy not available. Simulating voice commands instead.")
+    print("Speech_recognition or PyAudio not available. Install with:")
+    print("pip install SpeechRecognition pyaudio")
+    print("Simulating voice commands instead.")
     VOICE_AVAILABLE = False
 
 class Wheelchair:
@@ -49,6 +51,60 @@ class Obstacle:
         self.y = y
         self.radius = radius
 
+class VoiceCommandProcessor(threading.Thread):
+    def __init__(self, command_queue):
+        threading.Thread.__init__(self, daemon=True)
+        self.command_queue = command_queue
+        self.recognizer = sr.Recognizer()
+        self.running = True
+        self.commands = ['forward', 'backward', 'left', 'right', 'stop']
+        
+    def run(self):
+        print("Voice recognition thread started. Listening for commands...")
+        
+        while self.running:
+            try:
+                # Use the default microphone as the audio source
+                with sr.Microphone() as source:
+                    print("Say a command...")
+                    # Adjust for ambient noise and set timeout
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    # Listen for the user's input
+                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=2)
+                    
+                try:
+                    # Recognize speech using Google Speech Recognition
+                    text = self.recognizer.recognize_google(audio).lower()
+                    print(f"Recognized: {text}")
+                    
+                    # Check for valid commands
+                    command = 'stop'  # Default command
+                    for cmd in self.commands:
+                        if cmd in text:
+                            command = cmd
+                            break
+                    
+                    # Put the command in the queue
+                    self.command_queue.put(command)
+                    
+                except sr.UnknownValueError:
+                    print("Could not understand audio")
+                except sr.RequestError as e:
+                    print(f"Could not request results; {e}")
+                    # If online recognition fails, put 'stop' command
+                    self.command_queue.put('stop')
+                    
+            except Exception as e:
+                print(f"Error in voice recognition: {e}")
+                # Put 'stop' command in case of error
+                self.command_queue.put('stop')
+                
+            # Short delay to avoid consuming too much CPU
+            time.sleep(0.2)
+            
+    def stop(self):
+        self.running = False
+
 class WheelchairSimulation:
     def __init__(self):
         # Simulation parameters
@@ -73,8 +129,7 @@ class WheelchairSimulation:
         # Voice command settings
         self.voice_commands = ['forward', 'backward', 'left', 'right', 'stop']
         self.current_command = 'stop'
-        self.voice_recognition_timer = 0
-        self.voice_update_interval = 2.0
+        self.command_queue = queue.Queue()
         
         # Set up figure for animation
         self.fig, self.ax = plt.subplots(figsize=(8, 8))
@@ -104,9 +159,12 @@ class WheelchairSimulation:
         # Text for displaying current command
         self.command_text = self.ax.text(0.5, self.map_size-0.5, '', fontsize=14)
         
-        # Voice recognition module
+        # Start voice recognition if available
         if VOICE_AVAILABLE:
-            self.voice_recognizer = VoiceRecognizer()
+            self.voice_processor = VoiceCommandProcessor(self.command_queue)
+            self.voice_processor.start()
+        else:
+            print("Running with simulated voice commands.")
     
     def update_wheelchair_viz(self):
         # Update triangle representing wheelchair
@@ -137,15 +195,23 @@ class WheelchairSimulation:
             end_y = y + self.sensor_range * math.sin(angles[i])
             line.set_data([x, end_x], [y, end_y])
     
-    def recognize_voice_command(self):
+    def get_voice_command(self):
         if VOICE_AVAILABLE:
-            return self.voice_recognizer.recognize_command()
+            # Check if there's a new command in the queue
+            try:
+                # Non-blocking get with timeout
+                command = self.command_queue.get(block=False)
+                print(f"New command received: {command}")
+                return command
+            except queue.Empty:
+                # No new command, return current command
+                return self.current_command
         else:
             # Simulate voice commands
-            if random.random() < 0.8:
+            if random.random() < 0.05:  # Lower probability to change commands
                 return random.choice(self.voice_commands)
             else:
-                return 'stop'
+                return self.current_command
     
     def detect_obstacles(self):
         # Check distance to each obstacle
@@ -174,11 +240,10 @@ class WheelchairSimulation:
         return detected, min_dist, avoid_angle
     
     def animation_step(self, frame):
-        # Update voice recognition timer
-        self.voice_recognition_timer += self.dt
-        if self.voice_recognition_timer >= self.voice_update_interval:
-            self.current_command = self.recognize_voice_command()
-            self.voice_recognition_timer = 0
+        # Check for new voice commands
+        new_command = self.get_voice_command()
+        if new_command != self.current_command:
+            self.current_command = new_command
         
         # Convert voice commands to motion commands
         v_cmd = 0
@@ -234,105 +299,16 @@ class WheelchairSimulation:
         plt.xlabel('X position (m)')
         plt.ylabel('Y position (m)')
         plt.show()
-
-
-class VoiceRecognizer:
-    def __init__(self):
-        # Initialize PyAudio
-        self.format = pyaudio.paInt16
-        self.channels = 1
-        self.rate = 16000
-        self.chunk = 1024
-        self.record_seconds = 3 
         
-        self.audio = pyaudio.PyAudio()
-    
-    def record_audio(self):
-        # Open audio stream
-        stream = self.audio.open(format=self.format,
-                             channels=self.channels,
-                             rate=self.rate,
-                             input=True,
-                             frames_per_buffer=self.chunk)
-        
-        print("Recording...")
-        
-        # Record audio
-        frames = []
-        for i in range(0, int(self.rate / self.chunk * self.record_seconds)):
-            data = stream.read(self.chunk)
-            frames.append(data)
-        
-        print("Recording complete.")
-        
-        # Stop and close the stream
-        stream.stop_stream()
-        stream.close()
-        
-        # Convert frames to numpy array
-        audio_data = b''.join(frames)
-        audio_data = np.frombuffer(audio_data, dtype=np.int16)
-        
-        return audio_data
-    
-    def recognize_command(self):
-        try:
-            # Record audio
-            audio_data = self.record_audio()
-            
-            # Simple energy-based detection
-            energy = np.mean(np.abs(audio_data))
-            
-            # Process with FFT for frequency analysis
-            fft_data = fft(audio_data)
-            fft_data = np.abs(fft_data[:len(fft_data)//2])
-            
-            # Simple frequency band analysis
-            freq_bins = len(fft_data)
-            low_freq = int(freq_bins * 100 / self.rate)
-            mid_freq_low = int(freq_bins * 500 / self.rate)
-            mid_freq_high = int(freq_bins * 1500 / self.rate)
-            high_freq_low = int(freq_bins * 1500 / self.rate)
-            high_freq = int(freq_bins * 3000 / self.rate)
-            
-            low_energy = np.sum(fft_data[low_freq:mid_freq_low])
-            mid_energy = np.sum(fft_data[mid_freq_low:mid_freq_high])
-            high_energy = np.sum(fft_data[high_freq_low:high_freq])
-            
-            # Simple command classification
-            if energy < 1000:  # Threshold needs to be calibrated
-                return 'stop'
-            elif high_energy > mid_energy and high_energy > low_energy:
-                return 'forward'
-            elif low_energy > mid_energy and low_energy > high_energy:
-                return 'stop'
-            elif mid_energy > low_energy and mid_energy > high_energy * 1.5:
-                # Further classify left vs right based on frequency distribution
-                mid_low = np.sum(fft_data[mid_freq_low:int((mid_freq_low+mid_freq_high)/2)])
-                mid_high = np.sum(fft_data[int((mid_freq_low+mid_freq_high)/2):mid_freq_high])
-                if mid_high > mid_low:
-                    return 'right'
-                else:
-                    return 'left'
-            else:
-                return 'backward'
-                
-        except Exception as e:
-            print(f"Error in voice recognition: {e}")
-            return 'stop'  # Default to stop for safety
-    
-    def __del__(self):
-        # Clean up PyAudio
-        self.audio.terminate()
+        # Clean up voice processor thread
+        if VOICE_AVAILABLE:
+            self.voice_processor.stop()
 
 
 # Main execution
 if __name__ == "__main__":
     print("Voice-Controlled Wheelchair Simulation")
     print("Commands: forward, backward, left, right, stop")
-    
-    if not VOICE_AVAILABLE:
-        print("Running with simulated voice commands.")
     
     sim = WheelchairSimulation()
     sim.run()
